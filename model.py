@@ -25,7 +25,7 @@ class Citation(BaseModel):
         start_index (Optional[str]): The start index of the citation in the text.
     """
     end_index: str = Field(..., alias='endIndex')
-    sources: List[Source]
+    sources: Optional[List[Source]] = None
     start_index: Optional[str] = Field(None, alias='startIndex')
 
 
@@ -80,8 +80,8 @@ class Answer(BaseModel):
         related_questions (List[str]): Related questions to the query.
     """
     answer_text: str = Field(..., alias='answerText')
-    citations: List[Citation]
-    references: List[Reference]
+    citations: Optional[List[Citation]] = None
+    references: Optional[List[Reference]] = None
     related_questions: List[str] = Field(..., alias='relatedQuestions')
 
 

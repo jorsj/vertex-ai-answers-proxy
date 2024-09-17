@@ -205,7 +205,7 @@ async def answer(
         },
     )
     print(response.text)
-    response = Response.model_validate(response.json())
+    response = Response.model_validate_json(response.text, strict=False)
     return response
 
 
