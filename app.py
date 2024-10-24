@@ -5,12 +5,21 @@ import re
 import google.auth.transport.requests
 import requests
 import uvicorn
+import json
 from fastapi import FastAPI, HTTPException, Security, status
 from fastapi.security import APIKeyHeader
 from google.auth import default
 from google.cloud import storage
 from google.cloud.exceptions import GoogleCloudError
 from model import Request, Metadata, Response
+
+logger = logging.getLogger(__name__)
+
+LOGGING_LEVEL = os.environ.get("LOGGING_LEVEL", "INFO").upper()
+
+logging.basicConfig(
+    level=LOGGING_LEVEL, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 creds, _ = default()
 auth_req = google.auth.transport.requests.Request()
@@ -46,9 +55,9 @@ def create_session(user_pseudo_id: str, data_store: str) -> str:
         "url": f"https://discoveryengine.googleapis.com/v1alpha/projects/{project}/locations/global/collections/default_collection/dataStores/{data_store}/sessions",
         "headers": {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {creds.token}"
+            "Authorization": f"Bearer {creds.token}",
         },
-        "json": {"user_pseudo_id": user_pseudo_id}
+        "json": {"user_pseudo_id": user_pseudo_id},
     }
     session = make_api_call(**payload)
     return session.json()["name"]
@@ -127,6 +136,7 @@ def make_api_call(*args, **kwargs):
                            if the API call was successful.
         None: If the credentials are invalid and cannot be refreshed.
     """
+    logging.info(json.dumps(kwargs["json"], ensure_ascii=False))
     if not creds.valid:
         if creds.expired and creds.refresh_token:
             creds.refresh(auth_req)
@@ -135,7 +145,9 @@ def make_api_call(*args, **kwargs):
             # (e.g., the user revoked access)
             logging.error("Credentials are invalid and cannot be refreshed.")
             return
-    return requests.post(*args, **kwargs)
+    response = requests.post(*args, **kwargs)
+    logging.info(json.dumps(response.text, ensure_ascii=False))
+    return response
 
 
 def get_metadata(uri: str) -> list[Metadata]:
@@ -168,7 +180,7 @@ def get_metadata(uri: str) -> list[Metadata]:
 
 @app.post("/answer/{data_store}", response_model_exclude_none=True)
 async def answer(
-        data_store: str, request: Request, api_key: str = Security(get_api_key)
+    data_store: str, request: Request, api_key: str = Security(get_api_key)
 ) -> Response:
     """
     Answers a user's query using Vertex AI Answers API.
@@ -195,7 +207,7 @@ async def answer(
         "url": f"https://discoveryengine.googleapis.com/v1alpha/projects/{project}/locations/global/collections/default_collection/dataStores/{data_store}/servingConfigs/default_search:answer",
         "headers": {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {creds.token}"
+            "Authorization": f"Bearer {creds.token}",
         },
         "json": {
             "query": {"text": request.query},
@@ -232,8 +244,8 @@ async def answer(
             },
             "groundingSpec": {
                 "filterLowGroundingAnswer": True,
-            }
-        }
+            },
+        },
     }
     response = make_api_call(**payload)
     response = Response.model_validate_json(response.text, strict=False)
