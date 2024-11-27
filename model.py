@@ -139,7 +139,7 @@ class Request(BaseModel):
     Represents a request for information.
 
     Attributes:
-        prompt (str, optional): An optional prompt to provide context for the query.
+        preamble (str, optional): An optional prompt to provide context for the query.
         query (str): The user's query.
         session (Session, optional): Information about the user session.
         language_code (str, optional): The language code of the request (default: "es").
@@ -147,7 +147,7 @@ class Request(BaseModel):
         ignore_non_summary_seeking_query (bool, optional): Whether to ignore non-summary seeking queries (default: True).
     """
 
-    prompt: Optional[str] = Field(None)
+    preamble: Optional[str] = Field(None)
     query: str
     session: Optional[Session] = None
     language_code: Optional[str] = Field("es", alias="languageCode")
