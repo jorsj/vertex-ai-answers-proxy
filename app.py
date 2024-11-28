@@ -7,19 +7,20 @@ import asyncio
 import datetime
 from fastapi import FastAPI, HTTPException, Security, status
 from fastapi.security import APIKeyHeader
+from fastapi.responses import JSONResponse
 from google.cloud import storage
 from google.cloud.exceptions import GoogleCloudError
 from google.cloud import discoveryengine_v1 as discoveryengine
 from google.api_core.client_options import ClientOptions
 from proto import Message
-from google.protobuf.json_format import MessageToJson
-from model import Request, Metadata, Response
+from google.protobuf.json_format import MessageToJson, MessageToDict
+from model import Request
+from functools import lru_cache
 
 API_KEY = os.environ["API_KEY"]
 PROJECT_ID = os.environ["GOOGLE_CLOUD_PROJECT"]
 BUCKET_NAME = os.environ["GCS_BUCKET"]
 LOCATION = os.environ.get("LOCATION", "global")
-MODEL_VERSION = os.environ.get("MODEL_VERSION", "gemini-1.5-flash-001/answer_gen/v2")
 
 storage_client = storage.Client()
 logging_bucket = storage_client.bucket(BUCKET_NAME)
@@ -38,7 +39,7 @@ app = FastAPI(docs_url=None, redoc_url=None)
 api_key_header = APIKeyHeader(name="X-API-Key")
 
 
-async def write_to_gcs(payload, session_name: str):
+async def write_to_gcs(answer, session_name: str):
     """
     Asynchronously writes a payload to a GCS bucket.
 
@@ -47,14 +48,19 @@ async def write_to_gcs(payload, session_name: str):
         :param session_name:
     """
 
+    json_payload = MessageToJson(
+        Message.pb(answer),
+        ensure_ascii=False,
+    )
+
     filename = f"vertexai-answers-proxy/logs/{session_name}/{datetime.datetime.now().isoformat()}.json"
 
     try:
         blob = logging_bucket.blob(filename)
-        await asyncio.to_thread(blob.upload_from_string, str(payload))
-        print(f"Payload written to gs://{BUCKET_NAME}/{filename}")
+        await asyncio.to_thread(blob.upload_from_string, str(json_payload))
+        logging.info(f"Payload written to gs://{BUCKET_NAME}/{filename}")
     except Exception as e:
-        print(f"Error writing to GCS: {e}")
+        logging.error(f"Error writing to GCS: {e}")
 
 
 def create_session(user_pseudo_id: str, engine_id: str) -> str:
@@ -78,7 +84,6 @@ def create_session(user_pseudo_id: str, engine_id: str) -> str:
         parent=f"projects/{PROJECT_ID}/locations/{LOCATION}/collections/default_collection/engines/{engine_id}",
         session=discoveryengine.Session(user_pseudo_id=user_pseudo_id),
     )
-    print(session)
     return session.name
 
 
@@ -134,7 +139,8 @@ async def healthcheck() -> str:
     return "OK"
 
 
-def get_metadata(uri: str) -> list[Metadata]:
+@lru_cache(maxsize=None)
+def get_metadata(uri: str) -> dict[str, str]:
     """
     Extracts metadata from a Google Cloud Storage object.
 
@@ -148,24 +154,57 @@ def get_metadata(uri: str) -> list[Metadata]:
         ValueError: If the provided URI is not a valid Google Cloud Storage URI.
         GoogleCloudError: If there is an error communicating with the Google Cloud Storage service.
     """
-    metadata = []
+    metadata = {}
     try:
         bucket_name, blob_name = parse_gcs_uri(uri)
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.get_blob(blob_name)
         for key, value in zip(blob.metadata.keys(), blob.metadata.values()):
-            metadata.append(Metadata(key=key, value=value))
-        return metadata
+            metadata[key] = value
     except ValueError as e:
         logging.error(f"Error: Invalid Google Cloud Storage URI: {e}")
     except GoogleCloudError as e:
         logging.error(f"Error communicating with Google Cloud Storage: {e}")
+    except AttributeError as e:
+        logging.error(
+            f"I can't access object's metadata check GCP Project or IAM permissions: {e}"
+        )
+    return metadata
+
+
+def enrich_answer_with_metadata(answer):
+    """Enriches an answer message with object metadata from each referenced chunk's URI.
+
+    This function takes a protobuf answer message, converts it to a dictionary,
+    and then adds object metadata to each reference's chunk information.  The
+    metadata is retrieved using the `get_metadata` function, based on the URI
+    specified in the document metadata of each chunk.
+
+    Args:
+        answer: A protobuf message representing the answer.
+
+    Returns:
+        A dictionary representation of the enriched answer message, including
+        the added object metadata within each reference's chunkInfo.
+
+    Raises:
+        Any exceptions raised by `MessageToDict`, `Message.pb`, or `get_metadata` will be propagated.
+    """
+    answer_dict = MessageToDict(
+        Message.pb(answer),
+    )
+
+    for reference in answer_dict["answer"]["references"]:
+        uri = reference["chunkInfo"]["documentMetadata"]["uri"]
+        reference["chunkInfo"]["objectMetadata"] = get_metadata(uri)
+
+    return answer_dict
 
 
 @app.post("/answer/{engine_id}", response_model_exclude_none=True)
 async def answer(
     engine_id: str, request: Request, api_key: str = Security(get_api_key)
-) -> Response:
+) -> JSONResponse:
     """
     Answers a user's query using Vertex AI Answers API.
 
@@ -173,7 +212,7 @@ async def answer(
     along with related information like citations and related questions.
 
     Args:
-        engine_id: The data store to query against.
+        engine_id: The engine to query against.
         request: The incoming request containing the user's query and other parameters.
         api_key: The API key for authentication.
 
@@ -192,28 +231,28 @@ async def answer(
 
     query_understanding_spec = discoveryengine.AnswerQueryRequest.QueryUnderstandingSpec(
         query_rephraser_spec=discoveryengine.AnswerQueryRequest.QueryUnderstandingSpec.QueryRephraserSpec(
-            disable=False,
-            max_rephrase_steps=5,
+            disable=request.disable_query_rephraser,
+            max_rephrase_steps=request.max_rephrase_steps,
         ),
     )
 
     answer_generation_spec = discoveryengine.AnswerQueryRequest.AnswerGenerationSpec(
-        ignore_adversarial_query=False,
-        ignore_non_answer_seeking_query=False,
-        ignore_low_relevant_content=False,
+        ignore_adversarial_query=request.ignore_adversarial_query,
+        ignore_non_answer_seeking_query=request.ignore_non_answer_seeking_query,
+        ignore_low_relevant_content=request.ignore_low_relevant_content,
         model_spec=discoveryengine.AnswerQueryRequest.AnswerGenerationSpec.ModelSpec(
-            model_version=MODEL_VERSION,
+            model_version=request.model_version,
         ),
         prompt_spec=discoveryengine.AnswerQueryRequest.AnswerGenerationSpec.PromptSpec(
             preamble=request.preamble,
         ),
-        include_citations=True,
+        include_citations=request.include_citations,
         answer_language_code=request.language_code,
     )
 
     search_spec = discoveryengine.AnswerQueryRequest.SearchSpec(
         search_params=discoveryengine.AnswerQueryRequest.SearchSpec.SearchParams(
-            max_return_results=10,
+            max_return_results=request.max_return_results,
         )
     )
 
@@ -228,19 +267,15 @@ async def answer(
 
     answer = conversational_client.answer_query(request)
 
-    json_payload = MessageToJson(
-        Message.pb(answer),
-        ensure_ascii=False,
-    )
-
     asyncio.create_task(
-        write_to_gcs(json_payload, session_name)
+        write_to_gcs(answer, session_name)
     )  # Non-blocking task creation
 
-    response = Response.model_validate_json(json_payload, strict=False)
-    return response
+    answer = enrich_answer_with_metadata(answer)
+
+    return JSONResponse(content=answer)
 
 
 if __name__ == "__main__":
-    port = int(os.environ["PORT"])
+    port = os.environ.get("PORT", 8000)
     uvicorn.run(app, host="0.0.0.0", port=port)
