@@ -154,22 +154,14 @@ def get_metadata(uri: str) -> dict[str, str]:
         ValueError: If the provided URI is not a valid Google Cloud Storage URI.
         GoogleCloudError: If there is an error communicating with the Google Cloud Storage service.
     """
-    metadata = {}
     try:
         bucket_name, blob_name = parse_gcs_uri(uri)
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.get_blob(blob_name)
-        for key, value in zip(blob.metadata.keys(), blob.metadata.values()):
-            metadata[key] = value
-    except ValueError as e:
-        logging.error(f"Error: Invalid Google Cloud Storage URI: {e}")
-    except GoogleCloudError as e:
-        logging.error(f"Error communicating with Google Cloud Storage: {e}")
-    except AttributeError as e:
-        logging.error(
-            f"I can't access object's metadata check GCP Project or IAM permissions: {e}"
-        )
-    return metadata
+        return blob.metadata
+    except Exception as e:
+        logging.error(f"Error obtaining metadata for {uri}: {e}")
+    return None
 
 
 def enrich_answer_with_metadata(answer):
@@ -193,11 +185,12 @@ def enrich_answer_with_metadata(answer):
     answer_dict = MessageToDict(
         Message.pb(answer),
     )
-
-    for reference in answer_dict["answer"]["references"]:
-        uri = reference["chunkInfo"]["documentMetadata"]["uri"]
-        reference["chunkInfo"]["objectMetadata"] = get_metadata(uri)
-
+    try:
+        for reference in answer_dict["answer"]["references"]:
+            uri = reference["chunkInfo"]["documentMetadata"]["uri"]
+            reference["chunkInfo"]["objectMetadata"] = get_metadata(uri)
+    except KeyError as e:
+        logging.info(f"Answer does not contain any references: {e}")
     return answer_dict
 
 
