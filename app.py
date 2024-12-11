@@ -9,7 +9,6 @@ from fastapi import FastAPI, HTTPException, Security, status
 from fastapi.security import APIKeyHeader
 from fastapi.responses import JSONResponse
 from google.cloud import storage
-from google.cloud.exceptions import GoogleCloudError
 from google.cloud import discoveryengine_v1 as discoveryengine
 from google.api_core.client_options import ClientOptions
 from proto import Message
